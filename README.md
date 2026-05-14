@@ -168,7 +168,7 @@ best_model.load_state_dict(
 
 ## Model Weights
 
-All checkpoints are publicly available on Google Drive:
+All checkpoints are publicly available on HuggingFace:
 
 | Version | Val IoU | Description | Download |
 |---------|---------|-------------|----------|
