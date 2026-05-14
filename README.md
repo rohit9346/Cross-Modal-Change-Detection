@@ -172,10 +172,9 @@ All checkpoints are publicly available on Google Drive:
 
 | Version | Val IoU | Description | Download |
 |---------|---------|-------------|----------|
-| **V5 (PRIMARY)** | **0.4906** | 9-ch, γ=1.33 corrected, 1024px | **[best_v5.pth]([PASTE DRIVE LINK])** |
-| V4 | 0.3137 | 9-ch + NGRDI (with bug), 512px | [best_v4.pth]([PASTE DRIVE LINK]) |
-| V3 | 0.4198 | 7-ch, 512px crop experiment | [best_v3.pth]([PASTE DRIVE LINK]) |
-| V2 | 0.4757 | 7-ch, 1024px, prior best | [best_v2.pth]([PASTE DRIVE LINK]) |
+| **V5 (PRIMARY)** | **0.4906** | 9-ch, γ=1.33 corrected, 1024px | **[best_v5.pth](https://huggingface.co/Rohit7901/galaxeye-change-detection/resolve/main/best_v5.pth)** |
+| V3 | 0.4198 | 7-ch, 512px crop ablation | [best_v3.pth](https://huggingface.co/Rohit7901/galaxeye-change-detection/resolve/main/best_v3.pth) |
+| V2 | 0.4757 | 7-ch, 1024px, prior best | [best_v2.pth](https://huggingface.co/Rohit7901/galaxeye-change-detection/resolve/main/best_v2.pth) |
 
 > **Primary submission weights:** V5 (`best_v5.pth`)  
 > All weights require the same architecture: `ResNet34UNet(in_channels=9)` for V4/V5, `ResNet34UNet(in_channels=7)` for V2/V3.
