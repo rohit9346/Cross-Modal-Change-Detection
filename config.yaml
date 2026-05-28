@@ -1,0 +1,189 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# GalaxEye Space — Binary Change Detection
+# V9 Configuration — Final Dual-Encoder Model
+# Candidate: Rohit Robert | May 2026
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Dataset ──────────────────────────────────────────────────────────────────
+dataset:
+  base_dir: "/kaggle/input/datasets/rohitrobertc2/galaxyeye-change-detection-v2"
+  splits:
+    train:
+      pre:    "train/pre-event"
+      post:   "train/post-event"
+      target: "train/target"
+    val:
+      pre:    "change_detection_assignment_data/val/pre-event"
+      post:   "change_detection_assignment_data/val/post-event"
+      target: "change_detection_assignment_data/val/target"
+    test:
+      pre:    "change_detection_assignment_data/test/pre-event"
+      post:   "change_detection_assignment_data/test/post-event"
+      target: "change_detection_assignment_data/test/target"
+  counts:
+    train: 2781
+    val: 334
+    test: 77
+  label_remapping: "0,1 → 0 (no-change); 2,3 → 1 (change); test masks already {0,1} and mapped with ≥1 → 1"
+
+# ── Input Channels ───────────────────────────────────────────────────────────
+channels:
+  total: 9
+  eo_channels: 3
+  sar_channels: 6
+  description:
+    - index: 0-2
+      name: "EO RGB"
+      formula: "pre / 255.0"
+      range: "[0, 1]"
+    - index: 3
+      name: "SAR_norm"
+      formula: "(post - 1) / 230.0"
+      range: "[0, 1]"
+    - index: 4
+      name: "EO Luminance"
+      formula: "0.299*R + 0.587*G + 0.114*B"
+      range: "[0, 1]"
+    - index: 5
+      name: "Cross Diff"
+      formula: "SAR_norm - EO_lum"
+      range: "[-1, 1]"
+      note: "+ve ≈ rubble, −ve ≈ flood, ~0 ≈ intact"
+    - index: 6
+      name: "Cross Abs"
+      formula: "abs(Cross Diff)"
+      range: "[0, 1]"
+    - index: 7
+      name: "NGRDI"
+      formula: "(G - R) / (G + R + 1e-8), then (x + 1.0) / 2.0"
+      range: "[0, 1]"
+      note: "Normalised Green-Red Difference Index — vegetation proxy (no NIR band)"
+    - index: 8
+      name: "SAR-NGRDI"
+      formula: "SAR_norm * (1 - NGRDI_norm)"
+      range: "[0, 1]"
+      note: "High radar + vegetation loss → destruction signature"
+
+# ── Architecture ─────────────────────────────────────────────────────────────
+model:
+  name: "DualEncoderUNet"
+  eo_encoder:
+    backbone: "resnet34"
+    weights: "imagenet"
+    in_channels: 3
+  sar_encoder:
+    backbone: "resnet34"
+    weights: "imagenet"
+    in_channels: 6   # patched conv1
+  decoder:
+    type: "unet"
+    cbam:
+      bottleneck: true
+      d3: true
+      d2: true
+      d1: false
+      d0: false
+  num_classes: 1
+  output: "raw_logits"
+  note: "Pure PyTorch; dual ResNet34 encoders with CBAM and multi-scale EO–SAR fusion"
+
+# ── Loss Function ─────────────────────────────────────────────────────────────
+loss:
+  name: "HybridFocalBCE+FocalTversky"
+  focal_bce_weight: 0.3
+  focal_tversky_weight: 0.7
+  tversky:
+    alpha: 0.3       # FP penalty — lower (false alarms acceptable)
+    beta: 0.7        # FN penalty — higher (missing damage is critical)
+    gamma: 0.75      # Final γ used for best_v9.pth
+    smooth: 1.0
+
+# ── Optimiser ────────────────────────────────────────────────────────────────
+optimizer:
+  name: "AdamW"
+  encoder_lr: 1.0e-5    # Both encoders — conservative updates
+  decoder_lr: 1.0e-3    # Decoder + head — higher LR
+  weight_decay: 1.0e-4
+
+# ── Scheduler ────────────────────────────────────────────────────────────────
+scheduler:
+  name: "CosineAnnealingLR"
+  T_max: 50
+  eta_min: 1.0e-6
+
+# ── Training ─────────────────────────────────────────────────────────────────
+training:
+  seed: 42
+  batch_size: 4           # As used for final V9 run
+  num_epochs: 60
+  num_workers: 2
+  pin_memory: true
+  input_size: 1024        # Full resolution
+  checkpoint: "best_v9.pth"
+  early_stopping_patience: 10
+  early_stopping_metric: "val_iou"
+
+# ── Sampler ──────────────────────────────────────────────────────────────────
+sampler:
+  name: "WeightedRandomSampler"
+  pos_weight: 3.0           # Change-positive tiles sampled 3x
+  replacement: true
+
+# ── Augmentation ─────────────────────────────────────────────────────────────
+augmentation:
+  train:
+    - name: "RandomCrop"
+      size: 512
+      p: 1.0
+    - name: "HorizontalFlip"
+      p: 0.5
+    - name: "VerticalFlip"
+      p: 0.5
+    - name: "RandomRotate90"
+      p: 0.5
+  val_test:
+    - name: "CenterCrop"
+      size: 512
+  note: "Only geometric augmentations; EO and SAR receive identical spatial transforms via additional_targets"
+
+# ── Evaluation ───────────────────────────────────────────────────────────────
+evaluation:
+  threshold: 0.4
+  tta: true
+  tta_transforms:
+    - "original"
+    - "horizontal_flip"
+    - "vertical_flip"
+    - "horizontal_and_vertical_flip"
+  tta_aggregation: "mean"
+  metrics:
+    - "IoU"
+    - "Precision"
+    - "Recall"
+    - "F1"
+  metric_class: 1           # Change class
+  accumulation: "batch"     # Accumulate TP/FP/FN/TN across all batches
+
+# ── Results (V9 — Final Model) ───────────────────────────────────────────────
+results:
+  validation:
+    iou: 0.6050
+    precision: 0.6763
+    recall: 0.8517
+    f1: 0.7539
+    loss: 0.2319
+    tp: 8751600
+    fp: 4189635
+    fn: 1523548
+    tn: 73091313
+  test:
+    iou: 0.3230
+    precision: 0.4197
+    recall: 0.5837
+    f1: 0.4883
+    loss: 0.4828
+    tp: 323832
+    fp: 447794
+    fn: 230931
+    tn: 19182531
+    note: "Scene_09 is fully unseen geography; metrics reflect geographic distribution shift"
