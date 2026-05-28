@@ -60,9 +60,6 @@ Even in completely undamaged regions, EO and SAR images look radically different
 
 ## Architecture
 
-<div align="center">
-  <img src="assets/architecture.png" alt="Dual-Encoder Architecture for Change Detection" width="600"/>
-</div>
 
 ### Dual-Encoder ResNet34-UNet (V9)
 
@@ -97,9 +94,6 @@ Fusion
 
 ## Physics-Grounded Feature Engineering
 
-<div align="center">
-  <img src="assets/input_channels.png" alt="Distribution of Input Channels in V9 Dual-Encoder Architecture" width="680"/>
-</div>
 
 <br>
 
@@ -180,9 +174,7 @@ FOCAL_GAMMA   = 0.75
 
 ## Experimental Progression
 
-<div align="center">
-  <img src="assets/experiments.png" alt="Optimizing Dual-Encoder UNet for EO-SAR Change Detection" width="700"/>
-</div>
+
 
 <br>
 
@@ -198,10 +190,6 @@ FOCAL_GAMMA   = 0.75
 ---
 
 ## Results
-
-<div align="center">
-  <img src="assets/results_evolution.png" alt="Model Performance Evolution: From Failure to Robust Generalization" width="700"/>
-</div>
 
 <br>
 
