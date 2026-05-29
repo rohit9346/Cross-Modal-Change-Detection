@@ -22,88 +22,142 @@ dataset:
       target: "change_detection_assignment_data/test/target"
   counts:
     train: 2781
-    val: 334
-    test: 77
-  label_remapping: "0,1 → 0 (no-change); 2,3 → 1 (change); test masks already {0,1} and mapped with ≥1 → 1"
+    val:   334
+    test:  77   # scene_09 only — unseen geography
+  image_format: ".tif"
+  pre_event:
+    shape: [1024, 1024, 3]
+    dtype: uint8
+    range: [0, 255]
+    sensor: "EO optical (RGB)"
+  post_event:
+    shape: [1024, 1024]
+    dtype: uint8
+    range: [1, 231]
+    sensor: "SAR radar backscatter"
+  label_remapping: |
+    Train/Val: raw values 0,1 → 0 (no-change); 2,3 → 1 (change)
+    Test (scene_09): raw values are {0,1} only → mapped with >=1 → 1
 
 # ── Input Channels ───────────────────────────────────────────────────────────
 channels:
+  eo_channels: 3    # → EO encoder (ResNet34, standard 3-ch ImageNet init)
+  sar_channels: 6   # → SAR encoder (ResNet34, conv1 patched for 6ch)
   total: 9
-  eo_channels: 3
-  sar_channels: 6
   description:
-    - index: 0-2
+    - index: "0-2"
       name: "EO RGB"
       formula: "pre / 255.0"
       range: "[0, 1]"
+      encoder: "eo"
     - index: 3
-      name: "SAR_norm"
-      formula: "(post - 1) / 230.0"
+      name: "SAR normalised"
+      formula: "(post - 1) / 230.0, clipped to [0,1]"
       range: "[0, 1]"
+      encoder: "sar"
     - index: 4
       name: "EO Luminance"
       formula: "0.299*R + 0.587*G + 0.114*B"
       range: "[0, 1]"
+      encoder: "sar"
+      note: "Pre-disaster brightness — reference for cross-modal comparison"
     - index: 5
       name: "Cross Diff"
       formula: "SAR_norm - EO_lum"
       range: "[-1, 1]"
-      note: "+ve ≈ rubble, −ve ≈ flood, ~0 ≈ intact"
+      encoder: "sar"
+      note: "+ve ≈ rubble (SAR bright, EO dim); -ve ≈ flood; ~0 ≈ no change"
     - index: 6
       name: "Cross Abs"
-      formula: "abs(Cross Diff)"
+      formula: "abs(SAR_norm - EO_lum)"
       range: "[0, 1]"
+      encoder: "sar"
+      note: "Unsigned change-likelihood signal"
     - index: 7
       name: "NGRDI"
-      formula: "(G - R) / (G + R + 1e-8), then (x + 1.0) / 2.0"
+      formula: "(G - R) / (G + R + 1e-8), then (x + 1.0) / 2.0 → [0,1]"
       range: "[0, 1]"
-      note: "Normalised Green-Red Difference Index — vegetation proxy (no NIR band)"
+      encoder: "sar"
+      note: "Normalised Green-Red Difference Index — vegetation health proxy (no NIR available)"
     - index: 8
       name: "SAR-NGRDI"
-      formula: "SAR_norm * (1 - NGRDI_norm)"
+      formula: "SAR_norm * (1 - NGRDI_normalised)"
       range: "[0, 1]"
-      note: "High radar + vegetation loss → destruction signature"
+      encoder: "sar"
+      note: "High SAR backscatter + low vegetation = destruction signature"
 
 # ── Architecture ─────────────────────────────────────────────────────────────
 model:
   name: "DualEncoderUNet"
+  note: "Pure PyTorch — no segmentation_models_pytorch (timm incompatible with Kaggle Python 3.12)"
   eo_encoder:
     backbone: "resnet34"
     weights: "imagenet"
     in_channels: 3
+    note: "Standard 3-channel init — no weight patching needed"
   sar_encoder:
     backbone: "resnet34"
     weights: "imagenet"
-    in_channels: 6   # patched conv1
+    in_channels: 6
+    note: "conv1 weight patched: repeat pretrained 3ch weights, trim to 6ch, rescale by 6/3"
+  bottleneck:
+    channels: 1024   # cat(eo_e4[512], sar_e4[512])
+    cbam: true
   decoder:
-    type: "unet"
-    cbam:
-      bottleneck: true
-      d3: true
-      d2: true
-      d1: false
-      d0: false
+    stages:
+      - name: d3
+        in_ch: 1024
+        eo_skip_ch: 256
+        sar_skip_ch: 256
+        out_ch: 256
+        cbam: true
+      - name: d2
+        in_ch: 256
+        eo_skip_ch: 128
+        sar_skip_ch: 128
+        out_ch: 128
+        cbam: true
+      - name: d1
+        in_ch: 128
+        eo_skip_ch: 64
+        sar_skip_ch: 64
+        out_ch: 64
+        cbam: false
+      - name: d0
+        in_ch: 64
+        eo_skip_ch: 64
+        sar_skip_ch: 64
+        out_ch: 32
+        cbam: false
+  head: "ConvTranspose2d(32,32) → Conv2d(32,1)"
+  output: "raw logits (B, 1, H, W) — apply sigmoid at inference"
   num_classes: 1
-  output: "raw_logits"
-  note: "Pure PyTorch; dual ResNet34 encoders with CBAM and multi-scale EO–SAR fusion"
 
 # ── Loss Function ─────────────────────────────────────────────────────────────
 loss:
-  name: "HybridFocalBCE+FocalTversky"
-  focal_bce_weight: 0.3
-  focal_tversky_weight: 0.7
-  tversky:
-    alpha: 0.3       # FP penalty — lower (false alarms acceptable)
-    beta: 0.7        # FN penalty — higher (missing damage is critical)
-    gamma: 0.75      # Final γ used for best_v9.pth
+  name: "HybridLoss"
+  formula: "FocalTversky + lambda_focal_bce * FocalBCE"
+  lambda_focal_bce: 0.3
+  focal_tversky:
+    alpha: 0.2        # FP penalty — lower (false alarms acceptable)
+    beta: 0.8         # FN penalty — higher (missing damage is critical)
+    gamma: 1.5        # CORRECTED — V1-V4 used 0.75, which inverts the focal mechanism
     smooth: 1.0
+    note: "gamma > 1 required: fractional exponentiation on [0,1] amplifies easy pixels if gamma < 1"
+  focal_bce:
+    pos_weight: 3.0   # Matches WeightedRandomSampler pos_weight
 
 # ── Optimiser ────────────────────────────────────────────────────────────────
 optimizer:
   name: "AdamW"
-  encoder_lr: 1.0e-5    # Both encoders — conservative updates
-  decoder_lr: 1.0e-3    # Decoder + head — higher LR
-  weight_decay: 1.0e-4
+  param_groups:
+    - name: "encoders (eo + sar)"
+      lr: 1.0e-5
+      note: "Both encoders — conservative LR to preserve ImageNet features"
+    - name: "decoder + CBAM + head"
+      lr: 1.0e-3
+      note: "Randomly initialised — needs higher LR"
+  weight_decay: 3.0e-4
 
 # ── Scheduler ────────────────────────────────────────────────────────────────
 scheduler:
@@ -114,76 +168,73 @@ scheduler:
 # ── Training ─────────────────────────────────────────────────────────────────
 training:
   seed: 42
-  batch_size: 4           # As used for final V9 run
+  batch_size: 4
   num_epochs: 60
   num_workers: 2
   pin_memory: true
-  input_size: 1024        # Full resolution
+  crop_size: 512
+  full_resolution: 1024
   checkpoint: "best_v9.pth"
   early_stopping_patience: 10
   early_stopping_metric: "val_iou"
+  environment: "Kaggle Notebook, Python 3.12, PyTorch 2.x, T4 GPU"
 
 # ── Sampler ──────────────────────────────────────────────────────────────────
 sampler:
   name: "WeightedRandomSampler"
-  pos_weight: 3.0           # Change-positive tiles sampled 3x
+  pos_weight: 3.0
   replacement: true
+  note: |
+    713/2781 train tiles have at least one change pixel.
+    3x oversampling brings effective ratio closer to 50/50.
 
 # ── Augmentation ─────────────────────────────────────────────────────────────
 augmentation:
   train:
-    - name: "RandomCrop"
-      size: 512
-      p: 1.0
-    - name: "HorizontalFlip"
-      p: 0.5
-    - name: "VerticalFlip"
-      p: 0.5
-    - name: "RandomRotate90"
-      p: 0.5
+    - {name: "RandomCrop",    size: 512, p: 1.0}
+    - {name: "HorizontalFlip",          p: 0.5}
+    - {name: "VerticalFlip",            p: 0.5}
+    - {name: "RandomRotate90",          p: 0.5}
   val_test:
-    - name: "CenterCrop"
-      size: 512
-  note: "Only geometric augmentations; EO and SAR receive identical spatial transforms via additional_targets"
+    - {name: "CenterCrop",    size: 512, p: 1.0}
+  constraints:
+    - "EO and SAR receive IDENTICAL spatial transforms via albumentations additional_targets"
+    - "No colour/brightness augmentation on SAR channels"
+    - "is_check_shapes=False required in A.Compose"
 
 # ── Evaluation ───────────────────────────────────────────────────────────────
 evaluation:
   threshold: 0.4
-  tta: true
-  tta_transforms:
-    - "original"
-    - "horizontal_flip"
-    - "vertical_flip"
-    - "horizontal_and_vertical_flip"
-  tta_aggregation: "mean"
-  metrics:
-    - "IoU"
-    - "Precision"
-    - "Recall"
-    - "F1"
-  metric_class: 1           # Change class
-  accumulation: "batch"     # Accumulate TP/FP/FN/TN across all batches
+  note: "Focal Tversky with beta=0.8 calibrates predictions below 0.5 — threshold lowered accordingly"
+  tta:
+    enabled: true
+    transforms: [original, horizontal_flip, vertical_flip, horizontal_and_vertical_flip]
+    aggregation: mean
+  metrics: [IoU, Precision, Recall, F1]
+  metric_class: 1   # Change class only
+  accumulation: "Accumulate TP/FP/FN/TN across all batches, compute once at epoch end"
 
-# ── Results (V9 — Final Model) ───────────────────────────────────────────────
+# ── Results ───────────────────────────────────────────────────────────────────
 results:
+  primary_checkpoint: "best_v9.pth"
   validation:
-    iou: 0.6050
+    iou:       0.6050
     precision: 0.6763
-    recall: 0.8517
-    f1: 0.7539
-    loss: 0.2319
+    recall:    0.8517
+    f1:        0.7539
+    loss:      0.2319
     tp: 8751600
     fp: 4189635
     fn: 1523548
     tn: 73091313
   test:
-    iou: 0.3230
+    iou:       0.3230
     precision: 0.4197
-    recall: 0.5837
-    f1: 0.4883
-    loss: 0.4828
-    tp: 323832
-    fp: 447794
-    fn: 230931
+    recall:    0.5837
+    f1:        0.4883
+    loss:      0.4828
+    tp:  323832
+    fp:  447794
+    fn:  230931
     tn: 19182531
-    note: "Scene_09 is fully unseen geography; metrics reflect geographic distribution shift"
+    note: "scene_09 is fully unseen geography — metrics reflect cross-scene distribution shift"
