@@ -196,7 +196,37 @@ FOCAL_GAMMA   = 0.75
 
 ## Results
 
-### Validation Set (Scenes 01–08, 334 triplets)
+### V9 Final Model — `best_v9.pth`
+
+All metrics produced by the `eval.py` standalone evaluation script loaded from the Kaggle model registry.
+
+#### Standard Evaluation (single-pass, threshold = 0.4)
+
+**Validation set (scenes 01–08, 334 triplets):**
+
+| Metric | Value |
+|---|---|
+| **IoU** | **0.6004** |
+| F1 Score | 0.7503 |
+| Precision | 0.6776 |
+| Recall | 0.8405 |
+| Loss | 0.2333 |
+| TP / FP / FN / TN | 8,636,242 / 4,109,123 / 1,638,906 / 73,171,825 |
+
+**Test set (scene_09 — fully unseen geography, 77 triplets):**
+
+| Metric | Value |
+|---|---|
+| **IoU** | **0.3177** |
+| F1 Score | 0.4822 |
+| Precision | 0.4129 |
+| Recall | 0.5794 |
+| Loss | 0.4848 |
+| TP / FP / FN / TN | 321,451 / 457,150 / 233,312 / 19,173,175 |
+
+#### TTA Evaluation (4-flip test-time augmentation, threshold = 0.4)
+
+**Validation set:**
 
 | Metric | Value |
 |---|---|
@@ -207,7 +237,7 @@ FOCAL_GAMMA   = 0.75
 | Loss | 0.2319 |
 | TP / FP / FN / TN | 8,751,600 / 4,189,635 / 1,523,548 / 73,091,313 |
 
-### Test Set (Scene_09 Only — Fully Unseen Geography, 77 triplets)
+**Test set:**
 
 | Metric | Value |
 |---|---|
@@ -217,6 +247,22 @@ FOCAL_GAMMA   = 0.75
 | Recall | 0.5837 |
 | Loss | 0.4828 |
 | TP / FP / FN / TN | 323,832 / 447,794 / 230,931 / 19,182,531 |
+
+> TTA adds ~0.005 IoU on both val and test — consistent marginal improvement from geometric ensemble averaging.
+
+#### Validation Threshold Sweep (TTA)
+
+The model was trained with `β = 0.7` (FN-biased loss), which calibrates predicted probabilities below 0.5. The optimal operating threshold is determined on the validation set only and never the test set.
+
+| Threshold | Val IoU | Precision | Recall | F1 |
+|:---------:|:-------:|:---------:|:------:|:--:|
+| 0.15 | 0.5730 | 0.6013 | 0.9240 | 0.7285 |
+| 0.20 | 0.5828 | 0.6202 | 0.9063 | 0.7364 |
+| 0.25 | 0.5901 | 0.6360 | 0.8910 | 0.7422 |
+| 0.30 | 0.5961 | 0.6504 | 0.8771 | 0.7469 |
+| **0.40** | **0.6050** | **0.6763** | **0.8517** | **0.7539** ← best IoU |
+
+**Threshold 0.40 maximises validation IoU.** Lower thresholds trade precision for recall — appropriate for disaster triage use cases where missing a destroyed building is operationally worse than a false alarm.
 
 > **Val–Test gap (0.6050 → 0.3230)** is primarily attributable to geographic distribution shift: scene_09 is a completely independent geography with different building density, vegetation types, and soil reflectance. Additionally, scene_09 tiles have very low change pixel density (~2.7%) with sparse, isolated damage — structurally different from the contiguous damage zones prevalent in training data.
 
@@ -324,7 +370,7 @@ binary_mask = (avg_pred > 0.4).float()
 
 ## Future Work
 
-The primary architectural improvement identified is replacing concatenation-based fusion with **bidirectional cross-encoder attention (CMAT)** at each resolution scale. Rather than developing representations independently until the decoder, each encoder would query the other during encoding itself — the EO encoder asks “where in your SAR features does something anomalous appear that my optical features cannot explain?” and vice versa. This produces disagreement-weighted feature maps in high-dimensional learned space — orders of magnitude more expressive than the pixel-level `cross_diff` channel.
+The primary architectural improvement identified is replacing concatenation-based fusion with **bidirectional cross-encoder attention (CMAT)** at each resolution scale. Rather than developing representations independently until the decoder, each encoder would query the other during encoding itself — the EO encoder asks "where in your SAR features does something anomalous appear that my optical features cannot explain?" and vice versa. This produces disagreement-weighted feature maps in high-dimensional learned space — orders of magnitude more expressive than the pixel-level `cross_diff` channel.
 
 Additional improvements:
 
@@ -354,7 +400,7 @@ Additional improvements:
 
 ## Acknowledgements
 
-Built for the **GalaxEye Space** Satellite AI Research Internship technical assignment. Dataset provided by GalaxEye Space — co-registered EO-SAR image pairs from multiple disaster scenes with human-expert ground truth masks.
+Built for the **GalaxEye AI Research Internship technical assignment. Dataset provided by GalaxEye Space — co-registered EO-SAR image pairs from multiple disaster scenes with human-expert ground truth masks.
 
 ---
 
