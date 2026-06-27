@@ -218,7 +218,7 @@ best_model.load_state_dict(
 
 ## Model Weights
 
-Weights are hosted on HuggingFace: [Rohit7901/eo-sar-change-detection](https://huggingface.co/Rohit7901/eo-sar-change-detection)
+Weights are hosted on HuggingFace: [Rohit7901/eo-sar-change-detection](https://huggingface.co/Rohit7901/Cross-model-change-detection)
 
 | Version | Architecture | Val IoU | Test IoU | Key change |
 |---------|-------------|---------|---------|------------|
