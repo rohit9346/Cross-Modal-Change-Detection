@@ -223,7 +223,7 @@ Weights are hosted on HuggingFace: [Rohit7901/eo-sar-change-detection](https://h
 | Version | Architecture | Val IoU | Test IoU | Key change |
 |---------|-------------|---------|---------|------------|
 | **V9 (best)** | DualEncoderUNet + CBAM | **0.6050** | **0.3230** | CBAM decoder, Lee filter |
-| V8 | DualEncoderUNet | 0.5810 | 0.2980 | Cross-modal bottleneck attention |
+| V8 | DualEncoderUNet | 0.5810 | 0.0298 | Cross-modal bottleneck attention |
 | V6 | ResNet34-UNet | 0.5200 | 0.0141 | γ corrected, baseline submission |
 | V5 | ResNet34-UNet | 0.4906 | 0.0080 | γ corrected to 1.33, NGRDI fixed |
 | V4 | ResNet34-UNet | 0.3137 | 0.0348 | 9 channels + NGRDI (bug present) |
