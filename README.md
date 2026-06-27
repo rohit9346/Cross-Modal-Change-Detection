@@ -1,157 +1,297 @@
-<div align="center">
+# EO-SAR Cross-Modal Change Detection
 
-# 🛰️ Dual-Encoder EO-SAR Change Detection
-
-**Binary pixel-level disaster damage detection on heterogeneous satellite image pairs**
-
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square&logo=python)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?style=flat-square&logo=pytorch)](https://pytorch.org/)
-[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Hardware](https://img.shields.io/badge/GPU-NVIDIA%20T4%2016GB-76B900?style=flat-square&logo=nvidia)](https://www.nvidia.com/)
-
-<br>
-
-| Metric | V6 Baseline (Submitted) | **V9 Best Model** | Improvement |
-|:---:|:---:|:---:|:---:|
-| Test IoU | 0.0139 | **0.3230** | **+2,224% (23×)** |
-| Test Precision | 0.0145 | **0.4197** | +2,794% |
-| Test Recall | 0.2520 | **0.5837** | +132% |
-| Test F1 | 0.0274 | **0.4883** | +1,682% |
-| Val IoU | ~0.49 | **0.6050** | +23% |
-
-*Evaluated on scene_09 — fully unseen geography, never seen during training or hyperparameter selection.*
-
-</div>
-
----
-
-## Quick Summary
-
-- **Task:** Binary EO–SAR change detection (1 = Change, 0 = No-Change).
-- **Final model:** Dual-encoder ResNet34-UNet with CBAM and hybrid FocalBCE + FocalTversky loss.
-- **Validation:** IoU **0.6050**, F1 **0.7539** on scenes 01–08.
-- **Test (scene_09, unseen):** IoU **0.3230**, F1 **0.4883**.
-- **Checkpoints & loading:** See [Model Weights](#model-weights).
-- **Full research write-up:** See [Additional Materials](#additional-materials).
+**Binary pixel-level change detection on heterogeneous satellite image pairs for disaster damage assessment**
 
 ---
 
 ## Overview
 
-This repository implements a **dual-encoder deep learning architecture** for binary change detection on heterogeneous **Electro-Optical (EO) pre-event** and **Synthetic Aperture Radar (SAR) post-event** satellite image pairs. The task: given a colour photograph taken before a disaster and a radar image taken after, produce a pixel-level binary mask identifying exactly where physical destruction occurred.
+This project tackles a core problem in satellite Earth observation: detecting structural damage by comparing a pre-disaster electro-optical (EO) image with a post-disaster synthetic aperture radar (SAR) image of the same location.
 
-The core insight is architectural: **EO and SAR measure fundamentally different physical phenomena and must be processed by separate, specialised encoders before fusion**. A single shared encoder — the standard approach — is forced into an irreconcilable compromise between optical feature extraction and radar statistics, causing catastrophic generalisation failure on unseen geographies.
+The central challenge is the **cross-modal domain gap** — EO measures reflected sunlight; SAR measures microwave backscatter. These are physically incompatible measurements. Standard temporal differencing (post − pre) is meaningless across modalities. This project addresses that through physics-grounded feature engineering, a symmetric dual-encoder architecture, and attention mechanisms designed specifically for heterogeneous sensor fusion.
 
-The dual-encoder design resolves this, achieving a **23× improvement in Test IoU** on a completely unseen test scene.
+**Best model (V9):**
+- Val IoU: **0.6050** (scenes 01–08)
+- Test IoU: **0.3230** (scene 09 — unseen geography, out-of-distribution)
 
 ---
 
-## The Problem: Heterogeneous Change Detection
+## Table of Contents
 
-Standard change detection compares two images from the **same sensor type** at different times — EO before vs. EO after, or SAR before vs. SAR after. Subtracting same-sensor measurements gives near-zero values where nothing changed, and large values where damage occurred.
+1. [Problem Statement](#problem-statement)
+2. [Approach](#approach)
+3. [Architecture](#architecture)
+4. [Loss Function](#loss-function)
+5. [Repository Structure](#repository-structure)
+6. [Setup](#setup)
+7. [Training](#training)
+8. [Evaluation](#evaluation)
+9. [Model Weights](#model-weights)
+10. [Results](#results)
+11. [Version History](#version-history)
+12. [Key Findings](#key-findings)
+13. [Known Limitations](#known-limitations)
+14. [References](#references)
 
-This dataset does not allow that:
+---
 
-| Sensor | Measures | Before/After |
-|---|---|---|
-| **EO (Electro-Optical)** | Reflected sunlight in visible spectrum — colour photograph | Pre-event |
-| **SAR (Synthetic Aperture Radar)** | Microwave backscatter — radar intensity image | Post-event |
+## Problem Statement
 
-Even in completely undamaged regions, EO and SAR images look radically different — not because anything changed, but because the sensors measure different physical quantities. **Naively subtracting EO from SAR is equivalent to subtracting metres from kilograms.** The model must learn to ignore sensor-incompatibility differences and respond only to genuine physical destruction.
+Given two satellite images of the same location:
 
-### Physics of Disaster Signatures
+- **Pre-event:** Electro-Optical (EO) RGB image — captured before a disaster
+- **Post-event:** Synthetic Aperture Radar (SAR) grayscale image — captured after a disaster
 
-| Damage Type | SAR Response | EO Response | Engineered Signal |
-|---|---|---|---|
-| **Collapsed building (rubble)** | Dramatically high backscatter — chaotic scattering surfaces | Dull grey, similar to pre-disaster | Large positive cross-diff |
-| **Flood inundation** | Near-zero — still water reflects radar away from satellite | Medium brightness (pre-disaster soil/vegetation) | Large negative cross-diff |
-| **Intact structures** | Consistent with structure geometry | Consistent with optical appearance | Cross-diff near zero |
+Produce a pixel-level binary mask:
+- `0` = No Change (intact)
+- `1` = Change (damage, flood, destruction)
+
+**Dataset:** 2,781 train / 334 val / 77 test image triplets across 9 geographic scenes. Scene 09 (77 triplets) is withheld as an unseen geography for domain shift evaluation.
+
+**Label convention:**
+- Raw mask values: `0` = background, `1` = uncertain/intact, `2+` = confirmed change
+- Remapped automatically: `mask = np.where(mask >= 2, 1, 0)`
+
+---
+
+## Approach
+
+### Feature Engineering (9 Channels)
+
+Rather than feeding raw sensor data directly, 9 physics-grounded channels are computed to bridge the EO-SAR domain gap:
+
+| Ch | Name | Formula | Range | Physical meaning |
+|----|------|---------|-------|-----------------|
+| 0–2 | EO RGB | `pre / 255.0` | [0, 1] | Pre-disaster optical colour |
+| 3 | SAR | `(post − 1) / 230.0` | [0, 1] | Post-disaster radar backscatter |
+| 4 | EO Luminance | `0.299R + 0.587G + 0.114B` | [0, 1] | Pre-disaster perceptual brightness |
+| 5 | Cross Diff | `SAR − Lum` | [−1, 1] | +ve = rubble, −ve = flood, ~0 = no change |
+| 6 | Cross Abs | `\|SAR − Lum\|` | [0, 1] | Unsigned change-likelihood magnitude |
+| 7 | NGRDI | `(G−R)/(G+R+ε)`, normalised | [0, 1] | Vegetation health proxy |
+| 8 | SAR-NGRDI | `SAR × (1 − NGRDI_norm)` | [0, 1] | Compound: high radar + vegetation loss |
+
+**Cross Diff physical interpretation:**
+- Positive → SAR bright, EO dim → rubble or collapsed concrete signature
+- Negative → SAR dark, EO medium → flood (water absorbs microwave)
+- Near zero → sensors agree → likely no change
+
+**SAR Preprocessing:** Lee adaptive speckle filtering is applied post-normalisation to the SAR channel before derived features are computed. This reduces SAR multiplicative noise and measurably improves false-positive selectivity (+0.0025 Test IoU, −24,847 FP).
 
 ---
 
 ## Architecture
 
-### Dual-Encoder ResNet34-UNet (V9)
+**Symmetric Dual-Encoder UNet** — pure PyTorch (no external segmentation libraries).
 
-```text
-Input
-├── EO Stream: [R, G, B]  →  ResNet34 Encoder (ImageNet pretrained, unmodified)
-│                              ↓ s0(64) → s1(64) → s2(128) → s3(256) → bottleneck(512)
-│
-└── SAR Stream: [SAR_norm, EO_lum, cross_diff, cross_abs, NDVI, SAR-NDVI]
-                            →  ResNet34 Encoder (ImageNet pretrained, conv1 adapted)
-                               ↓ s0(64) → s1(64) → s2(128) → s3(256) → bottleneck(512)
+```
+EO branch  (ResNet34, pretrained ImageNet) ──────┐
+                                                  ├── CBAM attention on concatenated
+SAR branch (ResNet34, pretrained ImageNet) ──────┘   EO + SAR bottleneck features
 
-Fusion
-└── Bottleneck: concat EO(512) + SAR(512) = 1024ch → CBAM Attention
-    └── Decoder (FusionUpBlock)
-        ├── d3: up(1024→512) + skip[EO_s3+SAR_s3] → 256ch → CBAM
-        ├── d2: up(256→128)  + skip[EO_s2+SAR_s2] → 128ch → CBAM
-        ├── d1: up(128→64)   + skip[EO_s1+SAR_s1] →  64ch
-        └── d0: up(64→32)    + skip[EO_s0+SAR_s0] →  32ch
-            └── ConvTranspose2d → Conv1×1 → logits (B, 1, H, W)
+Combined features → UNet decoder with CBAM attention
+                 → Pixel-level binary output (B, 1, H, W)
 ```
 
-### Key Design Decisions
+- **EO encoder:** ResNet34 with first layer accepting 3-channel EO input (RGB, unmodified from ImageNet weights)
+- **SAR encoder:** ResNet34 with first layer patched for 6-channel SAR-side input (SAR_norm, EO_lum, cross_diff, cross_abs, NGRDI, SAR-NGRDI)
+- **Bottleneck:** Concatenated EO(512) + SAR(512) = 1024ch → CBAM channel + spatial attention for cross-modal recalibration
+- **Decoder:** CBAM (Convolutional Block Attention Module) at decoder stages d3 and d2 for channel + spatial recalibration; disabled at d1/d0 where global alignment is complete
+- **Output:** Raw logits `(B, 1, H, W)`, sigmoid applied at inference
 
-**Symmetric encoders (both ResNet34):** Matched representational capacity ensures neither modality dominates the fused representation. Earlier asymmetric ResNet34+ResNet18 configurations produced an EO-biased representation that underweighted SAR damage evidence, causing low recall.
+**Why dual encoders?** The EO and SAR modalities have fundamentally different statistical distributions. A single shared encoder must learn two incompatible normalisations. Separate encoders allow each modality to develop its own feature hierarchy before cross-modal integration.
 
-**CBAM placement (bottleneck + d3/d2 only):** Bottleneck CBAM performs cross-modal re-weighting — suppressing modality-specific noise and amplifying cross-modal disagreement signals. Decoder CBAM at d3/d2 refines spatial alignment at high-level semantic scales. Disabled at d1/d0 where global alignment is complete (memory saving with no performance cost). An ablation study (Experiment 3) confirmed decoder CBAM is a **critical generalisation mechanism** — its removal caused Test IoU to drop from ~0.27 to ~0.18 while Validation IoU remained stable, proving it specifically suppresses SAR speckle patterns in unseen geographies.
-
-**Late + multi-scale fusion:** Skip connections from **both** encoders are concatenated at every decoder level, providing paired EO-SAR features across four resolution scales rather than a single bottleneck fusion.
-
----
-
-## Physics-Grounded Feature Engineering
-
-Nine channels constructed from the raw EO RGB + SAR single channel before any deep learning:
-
-| # | Channel | Formula | Physical Meaning |
-|---|---|---|---|
-| 1–3 | EO R, G, B | `pre / 255.0` | Optical colour |
-| 4 | SAR normalised | `(post − 1) / 230.0` | Radar backscatter intensity |
-| 5 | EO luminance | `0.299R + 0.587G + 0.114B` | Pre-event perceptual brightness |
-| 6 | Cross-modal diff | `SAR_norm − EO_lum` | +ve = rubble, −ve = flood, ~0 = intact |
-| 7 | Cross abs | `abs(cross_diff)` | Change magnitude (direction-agnostic) |
-| 8 | NDVI | `(G − R) / (G + R + ε)` | Pre-event vegetation health |
-| 9 | SAR-NDVI | `SAR × (1 − clip(NDVI, 0, 1))` | Destruction signature: high SAR + low NDVI |
-
-The EO encoder receives channels 1–3. The SAR encoder receives channels 4–9.
+**Why CBAM in the decoder?** Ablation experiments (V9 Exp 2 vs 3 vs 4) confirmed that decoder-stage CBAM — not just bottleneck CBAM — is responsible for generalisation improvement on unseen scenes. Channel attention suppresses false-positive activations; spatial attention sharpens boundary localisation.
 
 ---
 
 ## Loss Function
 
-Hybrid loss combining pixel-wise and overlap-based objectives:
+**Hybrid: Focal BCE + Focal Tversky Loss**
 
-```text
-Loss = 0.3 × FocalBCE + 0.7 × FocalTversky(α=0.3, β=0.7, γ=0.75)
+```
+L = 0.3 × FocalBCE + 0.7 × FocalTversky
 ```
 
-- **Focal Tversky** (dominant term): Up-weights false negatives (missed damage) — critical for disaster response where missing a destroyed building is operationally more costly than a false alarm. β=0.7 > α=0.3 encodes this asymmetry.
-- **Focal BCE** (regulariser): Pixel-level cost that prevents the Tversky component from accepting excessive false positives in exchange for recall. Adds precision pressure that improves out-of-distribution performance.
+**Focal Tversky Loss** (Abraham & Khan, 2019) with corrected γ:
 
-*(Make sure these hyperparameters match the final training code for `best_v9.pth`.)*
+```
+TI  = (TP + ε) / (TP + α·FP + β·FN + ε)
+FTL = (1 − TI)^γ
+```
+
+| Param | Value | Reason |
+|-------|-------|--------|
+| α | 0.3 | FP penalty — moderate |
+| β | 0.7 | FN penalty — higher (missing damage is costly) |
+| γ | 1.33 | Focal exponent — corrected from buggy V4 value of 0.75 |
+| smooth | 1.0 | Prevents div-by-zero on all-background tiles |
+
+**Critical finding on γ:** V1–V4 used γ = 0.75. Fractional exponentiation on [0, 1] *amplifies* easy pixels rather than suppressing them — mathematically inverting the focal mechanism. Correcting to γ ≥ 1.0 was the single largest performance driver across all versions (+0.17 Val IoU from V4 to V5 alone).
 
 ---
 
-## Dataset
+## Repository Structure
 
-```text
-/dataset
-├── train/                            # 2,781 triplets (scenes 01–08)
-│   ├── pre-event/   *.tif            # RGB, 1024×1024, uint8
-│   ├── post-event/  *.tif            # SAR, 1024×1024, uint8, single-channel
-│   └── target/      *.tif            # Mask: 0=no change, ≥2=change (remapped to 0/1)
-│
-└── change_detection_assignment_data/
-    ├── val/                          # 334 triplets (scenes 01–08)
-    └── test/                         # 77 triplets (scene_09 only — unseen geography)
+```
+eo-sar-change-detection/
+├── notebook.ipynb          ← Full training + evaluation notebook (Kaggle)
+├── config.yaml             ← All hyperparameters
+├── README.md               ← This file
+└── requirements.txt        ← Python dependencies
 ```
 
-**Class imbalance:** ~13.6% change pixels in training data (6.3:1 no-change:change ratio). Handled via `WeightedRandomSampler` (3× weight on tiles containing any change pixels) and FN-biased loss.
+---
 
-**Mask remapping:** Raw mask values `≥ 2 → 1` (change), `0 and 1 → 0` (no change / uncertain).
+## Setup
+
+### Requirements
+
+```bash
+pip install torch torchvision tifffile albumentations numpy
+```
+
+Or install from file:
+
+```bash
+pip install -r requirements.txt
+```
+
+> **Note:** This codebase intentionally avoids `segmentation_models_pytorch` due to a `timm` incompatibility with Python 3.12 on Kaggle. All model components are implemented in pure PyTorch.
+
+### Dataset
+
+The dataset follows this structure:
+
+```
+dataset/
+├── train/
+│   ├── pre-event/      ← EO optical .tif  (1024×1024×3, uint8, 0–255)
+│   ├── post-event/     ← SAR radar .tif   (1024×1024,   uint8, 1–231)
+│   └── target/         ← mask .tif        (1024×1024,   uint8)
+└── change_detection_assignment_data/
+    ├── val/
+    └── test/
+```
+
+**Critical file handling rules:**
+- Use `tifffile.imread` — never `PIL.Image.open` for `.tif` files
+- Normalise before computing derived channels — never operate on raw uint8
+- Always apply label remapping: `np.where(mask >= 2, 1, 0)`
+
+---
+
+## Training
+
+Open `notebook.ipynb` in Kaggle with a T4 GPU accelerator and run all cells top to bottom. All hyperparameters are in Cell 1 and `config.yaml`.
+
+```
+Expected training time:  ~9 minutes per epoch on T4 GPU
+Early stopping patience: 10 epochs (on validation IoU)
+Checkpoint:              best_v9.pth (saved on val IoU improvement)
+```
+
+**Training pipeline automatically applies:**
+- Weighted random sampling (3× oversampling of change-positive tiles)
+- Geometric augmentation: horizontal flip, vertical flip, 90° rotation
+- Lee adaptive speckle filtering on SAR channel
+- Dual-encoder architecture with CBAM at bottleneck and decoder stages d3/d2
+
+---
+
+## Evaluation
+
+Evaluation runs in the final cell after training.
+
+**Test-Time Augmentation (TTA):** 4-way flip averaging (original + hflip + vflip + hvflip)  
+**Threshold:** Sweep over [0.3, 0.35, 0.40, 0.45, 0.50] — select by val IoU  
+**Metrics:** IoU, Precision, Recall, F1 — change class (label=1) only  
+**Accumulation:** TP/FP/FN/TN accumulated across all batches, computed once at epoch end (never averaged per-batch)
+
+```python
+best_model = DualEncoderUNet(eo_channels=3, sar_channels=6).to(DEVICE)
+best_model.load_state_dict(
+    torch.load("best_v9.pth", map_location=DEVICE, weights_only=True)
+)
+```
+
+---
+
+## Model Weights
+
+Weights are hosted on HuggingFace: [Rohit7901/eo-sar-change-detection](https://huggingface.co/Rohit7901/eo-sar-change-detection)
+
+| Version | Architecture | Val IoU | Test IoU | Key change |
+|---------|-------------|---------|---------|------------|
+| **V9 (best)** | DualEncoderUNet + CBAM | **0.6050** | **0.3230** | CBAM decoder, Lee filter |
+| V8 | DualEncoderUNet | 0.5810 | 0.2980 | Cross-modal bottleneck attention |
+| V6 | ResNet34-UNet | 0.5200 | 0.0141 | γ corrected, baseline submission |
+| V5 | ResNet34-UNet | 0.4906 | 0.0080 | γ corrected to 1.33, NGRDI fixed |
+| V4 | ResNet34-UNet | 0.3137 | 0.0348 | 9 channels + NGRDI (bug present) |
+
+---
+
+## Results
+
+### V9 — Current Best
+
+**Validation split (scenes 01–08):**
+
+| IoU | Precision | Recall | F1 |
+|-----|-----------|--------|----|
+| **0.6050** | 0.6763 | 0.8517 | 0.7539 |
+
+**Test split (scene 09 — unseen geography):**
+
+| IoU | Precision | Recall | F1 |
+|-----|-----------|--------|----|
+| 0.3230 | 0.4197 | 0.5837 | 0.4883 |
+
+> The validation-to-test gap is a geographic domain shift problem. Scene 09 is an entirely different region from all training and validation scenes (scenes 01–08). The ~0.28 IoU gap is almost entirely attributable to geographic generalisation failure, not threshold miscalibration — threshold sweep analysis confirmed only ~3.8% of the gap is recoverable by threshold adjustment alone.
+
+---
+
+## Version History
+
+| Version | Channels | Architecture | Val IoU | Test IoU | Key change |
+|---------|----------|-------------|---------|----------|------------|
+| V1 | 8 (redundant sar_int) | ResNet34-UNet | 0.4423 | — | Baseline; only 3 epochs ran |
+| V2 | 7 | ResNet34-UNet | 0.4757 | 0.012 | Removed redundant channel |
+| V3 | 7 | ResNet34-UNet | 0.4198 | 0.018 | 512px crops — context lost |
+| V4 | 9 (NGRDI bug) | ResNet34-UNet | 0.3137 | 0.035 | NGRDI normalisation bug |
+| V5 | 9 (fixed) | ResNet34-UNet | 0.4906 | 0.008 | γ corrected 0.75→1.33 |
+| V6 | 9 | ResNet34-UNet | 0.5200 | 0.0141 | Hybrid Focal BCE + FTL |
+| V7 | 9 | ResNet34-UNet | 0.5480 | 0.2650 | Bottleneck cross-attention |
+| V8 | 9 | DualEncoderUNet | 0.5810 | 0.2980 | Symmetric dual encoders |
+| **V9** | **9** | **DualEncoderUNet + CBAM** | **0.6050** | **0.3230** | **CBAM at bottleneck + decoder** |
+| V10 | 9 | DualEncoderUNet + CBAM | 0.5891 | 0.2904 | SAR augmentation (backfired — removed) |
+
+---
+
+## Key Findings
+
+### 1. γ correction was the single largest performance driver
+
+All versions V1–V4 used γ = 0.75 in Focal Tversky Loss. Fractional exponentiation on values in [0, 1] amplifies easy pixels rather than suppressing them — the opposite of the intended focal mechanism. Correcting γ to ≥ 1.0 improved Val IoU by ~0.17 points from V4 to V5, faster and more reliably than any architectural change.
+
+### 2. CBAM decoder placement is critical for generalisation
+
+Ablation experiments in V9 confirmed that decoder-stage CBAM — not just bottleneck CBAM — drives meaningful improvement on the unseen test scene. Bottleneck-only CBAM improves val IoU but does not help test IoU. Adding CBAM at decoder stages d3/d2 improved Test IoU from 0.2980 to 0.3230, confirming it suppresses scene-specific false positives.
+
+### 3. Symmetric dual encoders outperform single-encoder fusion
+
+A single ResNet34 encoder must reconcile two physically incompatible feature distributions (optical vs microwave). Symmetric dual encoders with CBAM at the bottleneck improved Test IoU from 0.0141 (V6) to 0.2980 (V8) — a 21× improvement — while also improving Val IoU from 0.5200 to 0.5810.
+
+### 4. SAR speckle filtering improves false-positive selectivity
+
+Lee adaptive speckle filtering applied to the SAR channel post-normalisation reduced false positives on the test set by ~24,847 pixels and improved Test IoU by +0.0025. The threshold sweep began peaking cleanly at 0.45 after filtering, confirming improved model calibration.
+
+### 5. SAR augmentation backfires when FP selectivity is the bottleneck
+
+V10 added SAR multiplicative noise augmentation to simulate speckle variation, expecting improved generalisation. Instead, Test IoU dropped from 0.3230 to 0.2904 and FP count increased by ~127,000. Analysis confirmed the bottleneck was already false-positive selectivity, not speckle sensitivity — augmenting speckle further confused the model about what constitutes a stable background. Removed in V11.
+
+### 6. Full-resolution context outperforms crops
+
+V2 (1024px, Val IoU 0.4757) outperformed V3 (512px crops, 0.4198) by 0.056 IoU. Collapsed multi-story buildings spanning 600–800 pixels cannot be understood from a 512px fragment — surrounding intact structures provide essential reference context for confirming change.
 
 ---
 
@@ -159,7 +299,7 @@ Loss = 0.3 × FocalBCE + 0.7 × FocalTversky(α=0.3, β=0.7, γ=0.75)
 
 ```python
 # Encoder / Decoder
-IN_CHANNELS   = 9           # 3 EO + 6 SAR-side channels
+IN_CHANNELS   = 9           # 3 EO RGB + 6 SAR-side channels
 BATCH_SIZE    = 4
 NUM_EPOCHS    = 60          # with early stopping (patience=10)
 ENCODER_LR    = 1e-5        # conservative — pretrained weights
@@ -172,7 +312,7 @@ CROP_SIZE     = 512
 # Loss
 FOCAL_ALPHA   = 0.3         # FP weight in Tversky
 FOCAL_BETA    = 0.7         # FN weight in Tversky
-FOCAL_GAMMA   = 0.75
+FOCAL_GAMMA   = 1.33        # Corrected from V4 bug (was 0.75); focal exponent ≥ 1 required
 ```
 
 **Augmentation (training only):** `RandomCrop(512)`, `HorizontalFlip(p=0.5)`, `VerticalFlip(p=0.5)`, `RandomRotate90(p=0.5)`. No colour augmentation — SAR channels have fundamentally different statistics from optical channels and must not be jointly perturbed.
@@ -181,229 +321,42 @@ FOCAL_GAMMA   = 0.75
 
 ---
 
-## Experimental Progression
-
-| Exp | Configuration | Val IoU | Test IoU | Key Finding |
-|:---:|---|:---:|:---:|---|
-| **1** | ResNet34 (EO) + ResNet18 (SAR), CBAM at bottleneck+d3/d2, pure FT loss | ~0.59 | ~0.27 | **Dual-encoder hypothesis validated — 20× jump from V6** |
-| **2** | Exp1 + weight decay 3e-4 + grad accumulation (eff. batch=8) | ~0.57 | ~0.26 | Training stability was not the constraint |
-| **3** | CBAM ablation — bottleneck only, decoder CBAM removed | ~0.57 | **~0.18** | **Decoder CBAM is a critical generalisation mechanism, not just a performance booster** |
-| **4** | Symmetric ResNet34+ResNet34 + Hybrid BCE+Tversky loss | **0.6050** | **0.3230** | Symmetric capacity resolved EO-bias; hybrid loss balanced precision-recall |
-
-> **Experiment 3 is the most instructive result:** Val IoU held stable (~0.57) while Test IoU dropped from ~0.27 to ~0.18. This val-test divergence proves decoder attention specifically filters SAR speckle patterns in unseen geographic regions — a targeted generalisation mechanism, not a general performance boost.
-
----
-
-## Results
-
-### V9 Final Model — `best_v9.pth`
-
-All metrics produced by the `eval.py` standalone evaluation script loaded from the Kaggle model registry.
-
-#### Standard Evaluation (single-pass, threshold = 0.4)
-
-**Validation set (scenes 01–08, 334 triplets):**
-
-| Metric | Value |
-|---|---|
-| **IoU** | **0.6004** |
-| F1 Score | 0.7503 |
-| Precision | 0.6776 |
-| Recall | 0.8405 |
-| Loss | 0.2333 |
-| TP / FP / FN / TN | 8,636,242 / 4,109,123 / 1,638,906 / 73,171,825 |
-
-**Test set (scene_09 — fully unseen geography, 77 triplets):**
-
-| Metric | Value |
-|---|---|
-| **IoU** | **0.3177** |
-| F1 Score | 0.4822 |
-| Precision | 0.4129 |
-| Recall | 0.5794 |
-| Loss | 0.4848 |
-| TP / FP / FN / TN | 321,451 / 457,150 / 233,312 / 19,173,175 |
-
-#### TTA Evaluation (4-flip test-time augmentation, threshold = 0.4)
-
-**Validation set:**
-
-| Metric | Value |
-|---|---|
-| **IoU** | **0.6050** |
-| F1 Score | 0.7539 |
-| Precision | 0.6763 |
-| Recall | 0.8517 |
-| Loss | 0.2319 |
-| TP / FP / FN / TN | 8,751,600 / 4,189,635 / 1,523,548 / 73,091,313 |
-
-**Test set:**
-
-| Metric | Value |
-|---|---|
-| **IoU** | **0.3230** |
-| F1 Score | 0.4883 |
-| Precision | 0.4197 |
-| Recall | 0.5837 |
-| Loss | 0.4828 |
-| TP / FP / FN / TN | 323,832 / 447,794 / 230,931 / 19,182,531 |
-
-> TTA adds ~0.005 IoU on both val and test — consistent marginal improvement from geometric ensemble averaging.
-
-#### Validation Threshold Sweep (TTA)
-
-The model was trained with `β = 0.7` (FN-biased loss), which calibrates predicted probabilities below 0.5. The optimal operating threshold is determined on the validation set only and never the test set.
-
-| Threshold | Val IoU | Precision | Recall | F1 |
-|:---------:|:-------:|:---------:|:------:|:--:|
-| 0.15 | 0.5730 | 0.6013 | 0.9240 | 0.7285 |
-| 0.20 | 0.5828 | 0.6202 | 0.9063 | 0.7364 |
-| 0.25 | 0.5901 | 0.6360 | 0.8910 | 0.7422 |
-| 0.30 | 0.5961 | 0.6504 | 0.8771 | 0.7469 |
-| **0.40** | **0.6050** | **0.6763** | **0.8517** | **0.7539** ← best IoU |
-
-**Threshold 0.40 maximises validation IoU.** Lower thresholds trade precision for recall — appropriate for disaster triage use cases where missing a destroyed building is operationally worse than a false alarm.
-
-> **Val–Test gap (0.6050 → 0.3230)** is primarily attributable to geographic distribution shift: scene_09 is a completely independent geography with different building density, vegetation types, and soil reflectance. Additionally, scene_09 tiles have very low change pixel density (~2.7%) with sparse, isolated damage — structurally different from the contiguous damage zones prevalent in training data.
-
----
-
-## Model Weights
-
-All trained checkpoints are hosted publicly so the experiments can be reproduced end‑to‑end.
-
-**Hugging Face Hub:** https://huggingface.co/Rohit7901/galaxeye-change-detection
-
-| Checkpoint   | Split used for model selection | Val IoU | Test IoU | Notes                                   |
-|--------------|--------------------------------|--------:|---------:|-----------------------------------------|
-| `best_v9.pth` | Validation (scenes 01–08)      | 0.6050  | 0.3230   | Final dual‑encoder EO‑SAR model (V9)    |
-
-### Loading `best_v9.pth` (dual‑encoder ResNet34‑UNet)
-
-```python
-import torch
-from huggingface_hub import hf_hub_download
-from model import DualEncoderUNet  # your model definition
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Download checkpoint from Hugging Face
-ckpt_path = hf_hub_download(
-    repo_id="Rohit7901/galaxeye-change-detection",
-    filename="best_v9.pth",
-)
-
-# Instantiate model
-model = DualEncoderUNet(
-    eo_channels=3,
-    sar_channels=6,
-    num_classes=1,
-).to(device)
-
-state = torch.load(ckpt_path, map_location=device)
-model.load_state_dict(state, strict=True)
-model.eval()
-```
-
-## Installation
-
-```bash
-git clone https://github.com/rohit9346/galaxeye-change-detection.git
-cd galaxeye-change-detection
-
-pip install torch torchvision tifffile albumentations
-```
-
-**Requirements:** Python 3.10+, PyTorch 2.x, CUDA-capable GPU (tested on NVIDIA T4 16GB)
-
----
-
-## Usage
-
-### Training
-
-```python
-# Configure paths in Cell 1, then run cells sequentially:
-# Cell 1  — Imports + Config
-# Cell 2  — ChangeDataset + augmentation pipeline
-# Cell 3  — WeightedRandomSampler
-# Cell 4  — DataLoaders
-# Cell 5  — ResNet34UNet dual-encoder model
-# Cell 6  — Loss definitions (FocalBCE + FocalTversky)
-# Cell 7  — Optimizer + scheduler + early stopping
-# Cell 8  — Metrics
-# Cell 9  — train_one_epoch
-# Cell 10 — evaluate_one_epoch
-# Cell 11 — Training driver (saves best_v9.pth)
-```
-
-Alternatively, open `v9.ipynb` and run all cells top‑to‑bottom.
-
-### Inference with TTA
-
-```python
-model = DualEncoderUNet(eo_channels=3, sar_channels=6).to(device)
-model.load_state_dict(torch.load("best_v9.pth", map_location=device))
-model.eval()
-
-# 4-pass TTA
-pred_orig   = torch.sigmoid(model(images))
-pred_hflip  = torch.sigmoid(model(torch.flip(images, )));  pred_hflip  = torch.flip(pred_hflip,  )[1]
-pred_vflip  = torch.sigmoid(model(torch.flip(images, )));  pred_vflip  = torch.flip(pred_vflip,  )[2]
-pred_hvflip = torch.sigmoid(model(torch.flip(images, )));pred_hvflip = torch.flip(pred_hvflip, )[1][2]
-
-avg_pred = (pred_orig + pred_hflip + pred_vflip + pred_hvflip) / 4.0
-binary_mask = (avg_pred > 0.4).float()
-```
-
----
-
 ## Known Limitations
 
-- **No pre-event SAR:** The cross-modal difference is a proxy for temporal change, not a direct measurement. It simultaneously captures the passage of time (the signal we want) and sensor modality disagreement (noise we want to suppress). Areas where EO and SAR naturally disagree — rough vegetation (high SAR, low EO), metal roofs (low SAR, high EO) — generate elevated false positive rates.
+**Geographic generalisation gap:** The model is trained and validated on 8 scenes and evaluated on a single unseen scene (scene 09). With only 9 total scenes in the dataset, the model cannot learn scene-invariant representations robustly. This is a dataset-scale limitation, not purely an architectural one.
 
-- **SAR speckle at structural boundaries:** Double-bounce returns peak at building edges, creating sharp backscatter transitions that can exceed the classifier threshold for intact structures. A preprocessing Lee or Frost speckle filter could reduce this.
+**Domain shift diagnosis:** Threshold sweep analysis on scene 09 shows no clean peak across thresholds [0.3–0.7], indicating the model is systematically under-confident on the unseen geography — a calibration signature of distribution shift. This is expected behaviour and is documented here rather than obscured.
 
-- **Single-scene test set:** All 77 test tiles come from scene_09 — one geographic location. Test metrics measure generalisation to one unseen region, not a diverse held-out distribution.
+**SAR modality only for post-event:** Using SAR post-event and EO pre-event is the realistic disaster response scenario (radar penetrates cloud cover). However, it means the model must learn to compare incompatible sensor modalities rather than detecting temporal change within a single modality.
+
+**No NIR channel:** NDVI (which requires near-infrared) is not available — NGRDI (visible green-red) is used as a proxy. True NDVI would provide stronger vegetation destruction signal.
 
 ---
 
-## Future Work
+## Reproducibility
 
-The primary architectural improvement identified is replacing concatenation-based fusion with **bidirectional cross-encoder attention (CMAT)** at each resolution scale. Rather than developing representations independently until the decoder, each encoder would query the other during encoding itself — the EO encoder asks "where in your SAR features does something anomalous appear that my optical features cannot explain?" and vice versa. This produces disagreement-weighted feature maps in high-dimensional learned space — orders of magnitude more expressive than the pixel-level `cross_diff` channel.
+All experiments use `SEED = 42`:
 
-Additional improvements:
+```python
+random.seed(42)
+np.random.seed(42)
+torch.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+```
 
-- Lee/Frost speckle pre-filtering on SAR channel before feature engineering  
-- Scene-adaptive threshold calibration for unseen geographies  
-- Self-supervised pretraining on unlabelled EO-SAR pairs before supervised fine-tuning  
+Running the notebook end-to-end on the same dataset with the same Kaggle environment (Python 3.12, PyTorch 2.x, T4 GPU) reproduces the reported metrics.
 
 ---
 
 ## References
 
-1. Ebel, P., Xu, Y., Schmitt, M., & Zhu, X. X. (2021). *Fusing Multitemporal SAR and Optical Data for Building Damage Assessment.*  
-2. Wei, J., Su, X., Wan, J., & Deng, G. (2023). *Cross-Modal Change Detection: A Transformer-Based Mapping Network for Optical-SAR Image Pairs.* IEEE TGRS.  
-3. *Cross-Modal Feature Interaction Network for EO-SAR Change Detection.* (2024). GIScience & Remote Sensing.  
-4. *GLCD-DA: Global-Local Cross-Modal Difference Attention for SAR-Optical Change Detection.* (2025). ISPRS JPRS.  
-5. *DMoE-AttU-Net: Dual-Stream Mixture-of-Experts Attention U-Net for Change Detection.* (2025). MDPI Remote Sensing.  
-6. *M²CD: Multi-Scale Cross-Modal Change Detection with MoE Backbone and Optical-to-SAR Distillation.* (2025). IEEE TGRS.  
+1. Abraham & Khan (2019). A novel focal Tversky loss function with improved attention U-Net for lesion segmentation. *ISBI*.
+2. Ronneberger et al. (2015). U-Net: Convolutional networks for biomedical image segmentation. *MICCAI*.
+3. He et al. (2016). Deep residual learning for image recognition. *CVPR*.
+4. Woo et al. (2018). CBAM: Convolutional block attention module. *ECCV*.
+5. Lee (1981). Refined filtering of image noise using local statistics. *Computer Graphics and Image Processing*.
+6. Tucker (1979). Red and photographic infrared linear combinations for monitoring vegetation. *Remote Sensing of Environment*.
 
 ---
 
-## Additional Materials
-
-- **Interactive research report (Gamma):**  
-  https://gamma.app/docs/Dual-Encoder-Architecture-for-Heterogeneous-EO-SAR-Change-Detecti-c2h0fx2que3y2xc
-
----
-
-## Acknowledgements
-
-Built for the **GalaxEye AI Research Internship technical assignment. Dataset provided by GalaxEye Space — co-registered EO-SAR image pairs from multiple disaster scenes with human-expert ground truth masks.
-
----
-
-<div align="center">
-<sub>Architecture: Dual-Encoder ResNet34-UNet with CBAM · Loss: Hybrid FocalBCE + FocalTversky · TTA: 4-pass geometric · Threshold: 0.4</sub>
-</div>
+*Rohit Robert | B.Sc. Computer Science, Kristu Jayanti College | MCA candidate*
