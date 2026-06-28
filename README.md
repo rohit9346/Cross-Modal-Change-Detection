@@ -6,6 +6,8 @@
 
 ## Overview
 
+📄 **[Technical Report](https://gamma.app/docs/Dual-Encoder-Architecture-for-Heterogeneous-EO-SAR-Change-Detecti-c2h0fx2que3y2xc)** — architecture design, experimental progression, and results analysis
+
 This project tackles a core problem in satellite Earth observation: detecting structural damage by comparing a pre-disaster electro-optical (EO) image with a post-disaster synthetic aperture radar (SAR) image of the same location.
 
 The central challenge is the **cross-modal domain gap** — EO measures reflected sunlight; SAR measures microwave backscatter. These are physically incompatible measurements. Standard temporal differencing (post − pre) is meaningless across modalities. This project addresses that through physics-grounded feature engineering, a symmetric dual-encoder architecture, and attention mechanisms designed specifically for heterogeneous sensor fusion.
